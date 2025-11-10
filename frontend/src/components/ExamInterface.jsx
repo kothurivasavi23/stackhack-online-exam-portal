@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Clock, AlertCircle } from 'lucide-react';
 import ExamPortalLogo from './Logo';
@@ -16,25 +16,22 @@ const ExamInterface = ({ currentUser }) => {
   const [tabSwitchCount, setTabSwitchCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState('');
+  const submittingRef = useRef(false);
+  const MAX_TAB_SWITCHES = 3;
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const lastSwitchRef = useRef(0);
 
   useEffect(() => {
     loadExamData();
   }, [examId]);
 
-  // Tab switching detection (no auto-submit)
-  useEffect(() => {
-    const handleVisibilityChange = () => {
-      if (document.hidden && examStarted && exam) {
-        setTabSwitchCount(prev => prev + 1);
-      }
-    };
-
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
-  }, [examStarted, exam]);
+  // (moved below, after handleExamSubmit is defined)
 
   const handleExamSubmit = useCallback(async () => {
     try {
+      if (submittingRef.current || isSubmitting) return;
+      submittingRef.current = true;
+      setIsSubmitting(true);
       const response = await examAPI.submitExam(examId, {
         answers: studentAnswers,
         tabSwitches: tabSwitchCount
@@ -43,10 +40,46 @@ const ExamInterface = ({ currentUser }) => {
     } catch (error) {
       console.error('Failed to submit exam:', error);
       const errorMessage = error.response?.data?.error || 'Failed to submit exam. Please try again.';
+      setErrorMsg(errorMessage);
       alert(errorMessage);
-      navigate('/student');
+      submittingRef.current = false;
+      setIsSubmitting(false);
     }
   }, [examId, studentAnswers, tabSwitchCount, navigate]);
+
+  // Tab switching detection + auto-submit after MAX_TAB_SWITCHES
+  useEffect(() => {
+    const onTabSwitch = () => {
+      if (!examStarted || !exam) return;
+      if (submittingRef.current) return;
+      const now = Date.now();
+      if (now - lastSwitchRef.current < 1500) return; // debounce double events
+      lastSwitchRef.current = now;
+      setTabSwitchCount(prev => {
+        const next = prev + 1;
+        if (next >= MAX_TAB_SWITCHES) {
+          alert(`Exam will be auto-submitted due to ${next} tab switches.`);
+          handleExamSubmit();
+        } else {
+          const remaining = MAX_TAB_SWITCHES - next;
+          alert(`Warning: Tab switch detected. ${remaining} ${remaining === 1 ? 'chance' : 'chances'} left before auto-submit.`);
+        }
+        return next;
+      });
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.hidden) onTabSwitch();
+    };
+    const handleWindowBlur = () => onTabSwitch();
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('blur', handleWindowBlur);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('blur', handleWindowBlur);
+    };
+  }, [examStarted, exam, handleExamSubmit]);
 
   // Timer functionality
   useEffect(() => {
@@ -131,6 +164,11 @@ const ExamInterface = ({ currentUser }) => {
     setTabSwitchCount(0);
     setStudentAnswers({});
     setCurrentQuestionIndex(0);
+    // Try to enter fullscreen to discourage switching
+    try {
+      const el = document.documentElement;
+      if (el.requestFullscreen) el.requestFullscreen();
+    } catch {}
   };
 
   const handleAnswerChange = (questionId, answer) => {
@@ -263,9 +301,19 @@ const ExamInterface = ({ currentUser }) => {
               {tabSwitchCount > 0 && (
                 <div className="bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full flex items-center gap-1">
                   <AlertCircle className="w-4 h-4" />
-                  <span>{tabSwitchCount} tab switches</span>
+                  <span>
+                    {tabSwitchCount} tab switch{tabSwitchCount !== 1 ? 'es' : ''}
+                    {tabSwitchCount < MAX_TAB_SWITCHES ? ` (max ${MAX_TAB_SWITCHES})` : ' (limit reached)'}
+                  </span>
                 </div>
               )}
+              <button
+                onClick={handleExamSubmit}
+                disabled={isSubmitting}
+                className={`px-3 py-1 rounded-lg text-white ${isSubmitting ? 'bg-gray-400' : 'bg-blue-600 hover:bg-blue-700'}`}
+              >
+                {isSubmitting ? 'Submitting...' : 'Submit Exam'}
+              </button>
             </div>
           </div>
           <div className="mt-4">

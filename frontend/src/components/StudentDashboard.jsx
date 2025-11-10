@@ -2,15 +2,18 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { BookOpen, Clock, BarChart3 } from 'lucide-react';
 import ExamPortalLogo from './Logo';
-import { examAPI } from '../api';
+import { examAPI, studentAPI } from '../api';
 
 const StudentDashboard = ({ currentUser, onLogout }) => {
   const [exams, setExams] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [completedCount, setCompletedCount] = useState(0);
+  const [performance, setPerformance] = useState('-');
   const navigate = useNavigate();
 
   useEffect(() => {
     loadExams();
+    loadMyStats();
   }, []);
 
   const loadExams = async () => {
@@ -23,6 +26,20 @@ const StudentDashboard = ({ currentUser, onLogout }) => {
       alert(errorMessage);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadMyStats = async () => {
+    try {
+      const res = await studentAPI.getMySubmissions();
+      const completed = res.data?.completed ?? 0;
+      const perf = res.data?.performance;
+      setCompletedCount(completed);
+      setPerformance(typeof perf === 'number' ? `${perf}%` : '-');
+    } catch (e) {
+      // Silently ignore; cards will show defaults
+      setCompletedCount(0);
+      setPerformance('-');
     }
   };
 
@@ -63,12 +80,12 @@ const StudentDashboard = ({ currentUser, onLogout }) => {
 
           <div className="bg-white rounded-xl shadow-md p-6">
             <h3 className="text-lg font-semibold text-gray-900 mb-2">Completed Exams</h3>
-            <p className="text-3xl font-bold text-green-600">0</p>
+            <p className="text-3xl font-bold text-green-600">{completedCount}</p>
           </div>
 
           <div className="bg-white rounded-xl shadow-md p-6">
             <h3 className="text-lg font-semibold text-gray-900 mb-2">Performance</h3>
-            <p className="text-3xl font-bold text-purple-600">-</p>
+            <p className="text-3xl font-bold text-purple-600">{performance}</p>
           </div>
           <button
             onClick={() => navigate('/practice')}

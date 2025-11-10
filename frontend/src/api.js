@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const API_BASE_URL = '/api';
+const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
 
 const api = axios.create({
   baseURL: API_BASE_URL,
@@ -36,10 +36,10 @@ api.interceptors.response.use(
 );
 
 export const authAPI = {
-  login: (username, password) =>
-    api.post('/login', { username, password }),
-  faceLogin: (username) =>
-    api.post('/face-login', { username }),
+  login: (username, password, faceDesc) =>
+    api.post('/login', { username, password, faceDesc }),
+  faceLogin: (username, faceDesc) =>
+    api.post('/face-login', { username, faceDesc }),
   
   signup: (userData) =>
     api.post('/signup', userData),
@@ -103,6 +103,10 @@ export const examAPI = {
   
   exportExcel: (id) =>
     api.get(`/exams/${id}/export/excel`),
+};
+
+export const studentAPI = {
+  getMySubmissions: () => api.get('/my/submissions'),
 };
 
 export default api;

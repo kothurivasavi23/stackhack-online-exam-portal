@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { UserPlus, AlertCircle, Loader } from 'lucide-react';
 import ExamPortalLogo from './Logo';
@@ -18,10 +18,7 @@ const Signup = ({ onLogin }) => {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
-  const videoRef = useRef(null);
-  const streamRef = useRef(null);
-  const FACE_SIZE = 16;
-  const [faceSaved, setFaceSaved] = useState(false);
+  
 
   const handleChange = (e) => {
     setFormData({
@@ -30,32 +27,7 @@ const Signup = ({ onLogin }) => {
     });
   };
 
-  const handleRegisterFaceNow = async () => {
-    try {
-      setError('');
-      if (formData.role !== 'faculty') return;
-      if (!formData.username) { setError('Enter username first'); return; }
-      if (!videoRef.current || !streamRef.current) { setError('Camera not ready'); return; }
-      await new Promise(r => setTimeout(r, 300));
-      const canvas = document.createElement('canvas');
-      canvas.width = FACE_SIZE; canvas.height = FACE_SIZE;
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(videoRef.current, 0, 0, FACE_SIZE, FACE_SIZE);
-      const { data } = ctx.getImageData(0, 0, FACE_SIZE, FACE_SIZE);
-      const vec = [];
-      for (let i = 0; i < data.length; i += 4) {
-        const r = data[i], g = data[i + 1], b = data[i + 2];
-        const gray = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-        vec.push(gray);
-      }
-      const norm = Math.sqrt(vec.reduce((s, v) => s + v * v, 0)) || 1;
-      const desc = vec.map(v => v / norm);
-      localStorage.setItem(`face_desc_${formData.username.trim().toLowerCase()}`, JSON.stringify(desc));
-      setFaceSaved(true);
-    } catch (e) {
-      setError('Failed to capture face');
-    }
-  };
+  // No webcam usage
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -75,32 +47,6 @@ const Signup = ({ onLogin }) => {
     setLoading(true);
 
     try {
-      // If faculty, capture a face descriptor and store locally for sign-in later
-      if (formData.role === 'faculty') {
-        if (!videoRef.current || !streamRef.current) {
-          setError('Camera not ready. Please allow camera access.');
-          setLoading(false);
-          return;
-        }
-        // small delay
-        await new Promise(r => setTimeout(r, 400));
-        const canvas = document.createElement('canvas');
-        canvas.width = FACE_SIZE; canvas.height = FACE_SIZE;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(videoRef.current, 0, 0, FACE_SIZE, FACE_SIZE);
-        const { data } = ctx.getImageData(0, 0, FACE_SIZE, FACE_SIZE);
-        const vec = [];
-        for (let i = 0; i < data.length; i += 4) {
-          const r = data[i], g = data[i + 1], b = data[i + 2];
-          const gray = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-          vec.push(gray);
-        }
-        const norm = Math.sqrt(vec.reduce((s, v) => s + v * v, 0)) || 1;
-        const desc = vec.map(v => v / norm);
-        localStorage.setItem(`face_desc_${formData.username}`, JSON.stringify(desc));
-        setFaceSaved(true);
-      }
-
       const { confirmPassword, ...signupData } = formData;
       const response = await authAPI.signup(signupData);
       const { token, user } = response.data;
@@ -119,32 +65,7 @@ const Signup = ({ onLogin }) => {
     }
   };
 
-  // Start/stop camera automatically when role is faculty
-  useEffect(() => {
-    const startCam = async () => {
-      try {
-        if (!navigator.mediaDevices?.getUserMedia) return;
-        if (!streamRef.current) {
-          const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-          streamRef.current = stream;
-          if (videoRef.current) {
-            videoRef.current.srcObject = stream;
-            await videoRef.current.play();
-          }
-        }
-      } catch (e) {
-        // ignore; user may deny permissions
-      }
-    };
-    const stopCam = () => {
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach(t => t.stop());
-        streamRef.current = null;
-      }
-    };
-    if (formData.role === 'faculty') startCam(); else stopCam();
-    return () => stopCam();
-  }, [formData.role]);
+  // No webcam usage
 
   return (
     <div className="min-h-screen bg-gray-100 flex items-center justify-center p-4">
@@ -246,20 +167,6 @@ const Signup = ({ onLogin }) => {
                   <option value="senior_professor">Senior Professor</option>
                   <option value="assistant_professor">Assistant Professor</option>
                 </select>
-              </div>
-              <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-sm text-blue-800">
-                Face will be captured automatically from your camera during signup for Faculty login.
-              </div>
-              <div className="mt-2">
-                <video ref={videoRef} className="w-full rounded" muted playsInline />
-                <p className="text-xs text-gray-500 mt-1">Allow camera permission to register your face.</p>
-                <button
-                  type="button"
-                  onClick={handleRegisterFaceNow}
-                  className="mt-2 w-full border border-blue-300 text-blue-700 hover:bg-blue-50 rounded-lg py-2"
-                >
-                  {faceSaved ? 'Face Registered ✔' : 'Register Face Now'}
-                </button>
               </div>
             </>
           )}

@@ -5,6 +5,7 @@ const jwt = require('jsonwebtoken');
 const { body, validationResult } = require('express-validator');
 require('dotenv').config();
 const mongoose = require('mongoose');
+
 const {
   generateRegistrationOptions,
   verifyRegistrationResponse,
@@ -12,8 +13,29 @@ const {
   verifyAuthenticationResponse
 } = require('@simplewebauthn/server');
 
+// Mongoose User model (for persistence)
+let dbReady = false;
+let User;
+try {
+  const userSchema = new mongoose.Schema({
+    username: { type: String, unique: true, index: true },
+    email: { type: String, unique: true, sparse: true },
+    password: { type: String, required: true },
+    role: { type: String, enum: ['student', 'faculty', 'admin'], required: true },
+    name: String,
+    roll: String,
+    createdAt: { type: Date, default: Date.now },
+    faceDesc: { type: [Number] } // stored normalized descriptor
+  });
+  User = mongoose.models.User || mongoose.model('User', userSchema);
+} catch {}
+
+// DB connection is handled at the bottom with startServer()
+
 const app = express();
+
 const PORT = process.env.PORT || 5000;
+const USE_IN_MEMORY = (process.env.USE_IN_MEMORY === 'true') || (process.env.DISABLE_DB === 'true');
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 
 app.use(cors());
@@ -217,10 +239,26 @@ const hashPassword = async (password) => {
   return bcrypt.hash(password, salt);
 };
 
-// Initialize admin password
+// Initialize admin (in-memory and DB)
 const initializeAdmin = async () => {
   const adminPassword = await hashPassword('admin123');
-  users[0].password = adminPassword;
+  // In-memory seed
+  if (users && users[0]) users[0].password = adminPassword;
+
+  // DB seed if ready
+  if (dbReady && User) {
+    const existing = await User.findOne({ username: 'admin12' }).lean();
+    if (!existing) {
+      await User.create({
+        username: 'admin12',
+        email: 'admin@examportal.com',
+        password: adminPassword,
+        role: 'admin',
+        name: 'Admin User',
+        roll: 'ADM001'
+      });
+    }
+  }
 };
 initializeAdmin();
 
@@ -245,8 +283,12 @@ const authenticateToken = (req, res, next) => {
 // Routes
 
 // Health check
+app.get('/', (req, res) => {
+  res.json({ status: 'ok', service: 'exam-portal-backend', time: new Date().toISOString() });
+});
+
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'OK', message: 'Server is running' });
+  res.json({ ok: true, db: !!dbReady, time: new Date().toISOString() });
 });
 
 // Signup
@@ -259,35 +301,52 @@ app.post('/api/signup',
     body('name').trim().notEmpty().withMessage('Name is required')
   ],
   async (req, res) => {
+
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       return res.status(400).json({ errors: errors.array() });
     }
 
-    const { username, email, password, role, name, roll } = req.body;
+    const { username, email, password, role, name, roll, faceDesc } = req.body;
 
     // Check if user exists
-    if (users.find(u => u.username === username || u.email === email)) {
+    if (dbReady && User) {
+      const exists = await User.findOne({ $or: [{ username }, { email }] }).lean();
+      if (exists) return res.status(400).json({ error: 'Username or email already exists' });
+    } else if (users.find(u => u.username === username || u.email === email)) {
       return res.status(400).json({ error: 'Username or email already exists' });
     }
 
     try {
       const hashedPassword = await hashPassword(password);
-      const newUser = {
-        id: users.length + 1,
-        username,
-        email,
-        password: hashedPassword,
-        role,
-        name,
-        roll: roll || `STU${String(users.length + 1).padStart(3, '0')}`,
-        createdAt: new Date()
-      };
-
-      users.push(newUser);
+      let newUser;
+      if (dbReady && User) {
+        newUser = await User.create({
+          username,
+          email,
+          password: hashedPassword,
+          role,
+          name,
+          roll: roll || undefined,
+          faceDesc: Array.isArray(faceDesc) && faceDesc.length >= 64 ? faceDesc.map(Number) : undefined
+        });
+      } else {
+        newUser = {
+          id: users.length + 1,
+          username,
+          email,
+          password: hashedPassword,
+          role,
+          name,
+          roll: roll || `STU${String(users.length + 1).padStart(3, '0')}`,
+          createdAt: new Date(),
+          faceDesc: Array.isArray(faceDesc) && faceDesc.length >= 64 ? faceDesc.map(Number) : undefined
+        };
+        users.push(newUser);
+      }
 
       const token = jwt.sign(
-        { id: newUser.id, username: newUser.username, role: newUser.role },
+        { id: (newUser._id || newUser.id), username: newUser.username, role: newUser.role },
         JWT_SECRET,
         { expiresIn: '24h' }
       );
@@ -296,7 +355,7 @@ app.post('/api/signup',
         message: 'User created successfully',
         token,
         user: {
-          id: newUser.id,
+          id: (newUser._id || newUser.id),
           username: newUser.username,
           email: newUser.email,
           role: newUser.role,
@@ -305,6 +364,10 @@ app.post('/api/signup',
         }
       });
     } catch (error) {
+      if (error && (error.code === 11000 || (error.message && error.message.includes('duplicate key')))) {
+        return res.status(400).json({ error: 'Username or email already exists' });
+      }
+      console.error('Signup error:', error?.message || error);
       res.status(500).json({ error: 'Server error during signup' });
     }
   }
@@ -313,22 +376,48 @@ app.post('/api/signup',
 // Face login (Faculty) - trusts client-side match for demo purposes
 app.post('/api/face-login', async (req, res) => {
   try {
-    const { username } = req.body;
+    const { username, faceDesc } = req.body;
     if (!username) return res.status(400).json({ error: 'Username is required' });
-    const user = users.find(u => u.username === username && (u.role === 'faculty' || u.role === 'admin'));
+    let user = null;
+    if (dbReady && User) {
+      user = await User.findOne({ username, role: 'faculty' }).lean();
+    } else {
+      user = users.find(u => u.username === username && (u.role === 'faculty' || u.role === 'admin'));
+    }
     if (!user) return res.status(404).json({ error: 'Faculty user not found' });
 
+    if (!Array.isArray(faceDesc) || faceDesc.length < 64) {
+      return res.status(400).json({ error: 'Face descriptor missing or invalid' });
+    }
+    if (!Array.isArray(user.faceDesc) || user.faceDesc.length < 64) {
+      return res.status(400).json({ error: 'No face descriptor registered for this user' });
+    }
+
+    // Cosine similarity
+    const a = user.faceDesc.map(Number);
+    const b = faceDesc.map(Number);
+    const dot = a.reduce((s, v, i) => s + v * (b[i] || 0), 0);
+    const normA = Math.sqrt(a.reduce((s, v) => s + v * v, 0)) || 1;
+    const normB = Math.sqrt(b.reduce((s, v) => s + v * v, 0)) || 1;
+    const cosine = dot / (normA * normB);
+
+    const THRESHOLD = 0.98; // stricter threshold
+    if (cosine < THRESHOLD) {
+      return res.status(401).json({ error: 'Face verification failed' });
+    }
+
     const token = jwt.sign(
-      { id: user.id, username: user.username, role: user.role },
+      { id: (user._id || user.id), username: user.username, role: user.role },
       JWT_SECRET,
       { expiresIn: '24h' }
     );
 
     res.json({
       message: 'Face login successful',
+      similarity: Number(cosine.toFixed(4)),
       token,
       user: {
-        id: user.id,
+        id: (user._id || user.id),
         username: user.username,
         email: user.email,
         role: user.role,
@@ -345,7 +434,9 @@ app.post('/api/face-login', async (req, res) => {
 app.post('/api/webauthn/generate-registration-options', async (req, res) => {
   try {
     const { username } = req.body;
-    const user = users.find(u => u.username === username);
+    const user = dbReady && User
+      ? (await User.findOne({ username }).lean())
+      : users.find(u => u.username === username);
     if (!user || user.role !== 'faculty') {
       return res.status(400).json({ error: 'Faculty user not found' });
     }
@@ -510,7 +601,7 @@ app.post('/api/login',
       return res.status(400).json({ errors: errors.array() });
     }
 
-    const { username, password } = req.body;
+    const { username, password, faceDesc } = req.body;
 
     const user = users.find(u => u.username === username);
     if (!user) {
@@ -523,6 +614,8 @@ app.post('/api/login',
         return res.status(401).json({ error: 'Invalid credentials' });
       }
 
+      // Face verification disabled: allow faculty to login with username/password only
+
       const token = jwt.sign(
         { id: user.id, username: user.username, role: user.role },
         JWT_SECRET,
@@ -533,7 +626,7 @@ app.post('/api/login',
         message: 'Login successful',
         token,
         user: {
-          id: user.id,
+          id: (user._id || user.id),
           username: user.username,
           email: user.email,
           role: user.role,
@@ -548,27 +641,39 @@ app.post('/api/login',
 );
 
 // Get current user
-app.get('/api/me', authenticateToken, (req, res) => {
-  const user = users.find(u => u.id === req.user.id);
-  if (!user) {
-    // Fallback to JWT claims when in-memory users have been reset
+app.get('/api/me', authenticateToken, async (req, res) => {
+  if (dbReady && User) {
+    const user = await User.findById(req.user.id).lean();
+    if (user) {
+      return res.json({
+        id: user._id,
+        username: user.username,
+        email: user.email,
+        role: user.role,
+        name: user.name,
+        roll: user.roll
+      });
+    }
+  }
+  const mem = users.find(u => u.id === req.user.id);
+  if (mem) {
     return res.json({
-      id: req.user.id,
-      username: req.user.username,
-      email: undefined,
-      role: req.user.role,
-      name: req.user.username,
-      roll: undefined
+      id: mem.id,
+      username: mem.username,
+      email: mem.email,
+      role: mem.role,
+      name: mem.name,
+      roll: mem.roll
     });
   }
-
-  res.json({
-    id: user.id,
-    username: user.username,
-    email: user.email,
-    role: user.role,
-    name: user.name,
-    roll: user.roll
+  // Fallback to JWT claims
+  return res.json({
+    id: req.user.id,
+    username: req.user.username,
+    email: undefined,
+    role: req.user.role,
+    name: req.user.username,
+    roll: undefined
   });
 });
 
@@ -833,6 +938,21 @@ app.get('/api/exams/:id/submissions', authenticateToken, (req, res) => {
   res.json(examSubmissions);
 });
 
+// Get current student's submissions and aggregated performance
+app.get('/api/my/submissions', authenticateToken, (req, res) => {
+  const mySubs = submissions.filter(s => s.studentId === req.user.id);
+  const completed = mySubs.length;
+  const performance = completed > 0
+    ? Math.round(mySubs.reduce((sum, s) => sum + (typeof s.percentage === 'number' ? s.percentage : 0), 0) / completed)
+    : 0;
+
+  res.json({
+    completed,
+    performance,
+    submissions: mySubs
+  });
+});
+
 // Manual evaluation for coding questions (Admin/Faculty only)
 app.post('/api/exams/:id/evaluate', authenticateToken, (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'faculty') {
@@ -917,12 +1037,14 @@ app.post('/api/exams/:id/submit', authenticateToken, (req, res) => {
     }
   });
 
+  const student = users.find(u => u.id === req.user.id) || {};
+
   const submission = {
     id: submissions.length + 1,
     examId,
     studentId: req.user.id,
-    studentName: req.user.name,
-    rollNumber: req.user.roll,
+    studentName: student.name || req.user.username,
+    rollNumber: student.roll,
     score,
     total: totalMCQ,
     percentage: totalMCQ > 0 ? Math.round((score / totalMCQ) * 100) : 0,
@@ -947,17 +1069,36 @@ app.post('/api/exams/:id/submit', authenticateToken, (req, res) => {
 
 const MONGO_URI = process.env.MONGODB_URI || process.env.MONGO_URI || process.env.DATABASE_URL;
 
-mongoose
-  .connect(MONGO_URI)
-  .then(() => {
-    console.log('Connected to MongoDB Atlas');
-    app.listen(PORT, () => {
-      console.log(`Server running on http://localhost:${PORT}`);
-      console.log(`Admin credentials: username: admin12, password: admin123`);
-    });
-  })
-  .catch((err) => {
-    console.error('Failed to connect to MongoDB:', err.message);
-    process.exit(1);
+const startServer = (port = PORT, attempts = 0) => {
+  const server = app.listen(port, () => {
+    console.log(`Server running on http://localhost:${port}`);
+    console.log(`Admin credentials: username: admin12, password: admin123`);
   });
+  server.on('error', (err) => {
+    if (err && err.code === 'EADDRINUSE' && attempts < 10) {
+      const nextPort = port + 1;
+      console.warn(`Port ${port} in use. Retrying on port ${nextPort}...`);
+      startServer(nextPort, attempts + 1);
+    } else {
+      throw err;
+    }
+  });
+};
 
+if (MONGO_URI && !USE_IN_MEMORY) {
+  mongoose
+    .connect(MONGO_URI)
+    .then(() => {
+      console.log('Connected to MongoDB Atlas');
+      dbReady = true;
+      initializeAdmin();
+      startServer();
+    })
+    .catch((err) => {
+      console.error('Failed to connect to MongoDB:', err.message);
+      process.exit(1);
+    });
+} else {
+  console.warn('Starting server with in-memory storage only (DB disabled or no URI).');
+  startServer();
+}
